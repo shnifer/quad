@@ -10,13 +10,8 @@ type QTree struct {
 }
 
 func (Q *QTree) PinN(p V2, r node) bool {
-	if p.X < r.Min.X || p.X > r.Max.X || (p.X == r.Max.X && p.X != Q.bound.Max.X) {
-		return false
-	}
-	if p.Y < r.Min.Y || p.Y > r.Max.Y || (p.Y == r.Max.Y && p.Y != Q.bound.Max.Y) {
-		return false
-	}
-	return true
+	return !(p.X < r.Min.X || p.X > r.Max.X || (p.X == r.Max.X && p.X != Q.bound.Max.X) ||
+		p.Y < r.Min.Y || p.Y > r.Max.Y || (p.Y == r.Max.Y && p.Y != Q.bound.Max.Y))
 }
 
 type node struct {
@@ -43,25 +38,28 @@ func NewQTree(bound Rect, splitCount int, maxDepth byte) *QTree {
 }
 
 func (Q *QTree) Add(points ...V2) {
-	for _, point := range points {
-		if _, ok := Q.points[point]; !ok {
-			Q.points[point] = struct{}{}
-			Q.add(point, 0)
+	newPoints := make(Points, 0, len(points))
+	for _, p := range points {
+
+		if Q.PinN(p, Q.nodes[0]) {
+			if _, ok := Q.points[p]; !ok {
+				Q.points[p] = struct{}{}
+				newPoints = append(newPoints, p)
+			}
 		}
 	}
+	Q.add(newPoints, 0)
 }
 
-func (Q *QTree) add(p V2, iNode int) {
+func (Q *QTree) add(ps Points, iNode int) {
 	node := Q.nodes[iNode]
-	if !Q.PinN(p, node) {
-		return
-	}
-	Q.nodes[iNode].points = append(Q.nodes[iNode].points, p)
+	Q.nodes[iNode].points = append(Q.nodes[iNode].points, ps...)
 	if len(node.points) > Q.splitCount && node.subN == 0 {
 		Q.split(iNode)
 	} else if node.subN > 0 {
+		parts := ps.PartQuads(node.Mid())
 		for part := 0; part < 4; part++ {
-			Q.add(p, node.subN+part)
+			Q.add(parts[part], node.subN+part)
 		}
 	}
 }
@@ -82,10 +80,9 @@ func (Q *QTree) split(iNode int) {
 			subN:    0,
 		})
 	}
-	for _, p := range Q.nodes[iNode].points {
-		for i := 0; i < 4; i++ {
-			Q.add(p, subN+i)
-		}
+	parts := Q.nodes[iNode].points.PartQuads(n.Mid())
+	for i := 0; i < 4; i++ {
+		Q.add(parts[i], subN+i)
 	}
 }
 
@@ -111,16 +108,11 @@ func (Q *QTree) takeNearest(focus V2, num int) Points {
 			break
 		}
 		spot = current
-		if n.subN != 0 {
-			for i := n.subN; i < n.subN+4; i++ {
-				if Q.PinN(focus, Q.nodes[i]) {
-					current = i
-				}
-			}
-		}
-		if spot == current {
+		if n.subN == 0 {
 			break
 		}
+		quad := n.Mid().PQuad(focus)
+		current = n.subN + quad
 	}
 	n = Q.nodes[spot]
 	spotPoints := n.points.GetNClosest(focus, num)
@@ -128,13 +120,13 @@ func (Q *QTree) takeNearest(focus V2, num int) Points {
 	maxRect := Rect{
 		Min: V2{X: focus.X - maxDist, Y: focus.Y - maxDist},
 		Max: V2{X: focus.X + maxDist, Y: focus.Y + maxDist}}.
-		Bound(Q.bound)
+		BoundTo(Q.bound)
 	//check if dist radius is totally within spot node, if it is - we found num points we want
 	if Q.PinN(maxRect.Min, n) && Q.PinN(maxRect.Max, n) {
 		return spotPoints
 	}
 
-	empiricCap := len(n.points) * 4
+	empiricCap := uint(float64(len(Q.nodes[0].points))*maxRect.Area()/Q.bound.Area()) * 3
 	//rise up to node containing maxRect search area
 	for n.parentN >= 0 && !(Q.PinN(maxRect.Min, n) && Q.PinN(maxRect.Max, n)) {
 		spot = n.parentN
@@ -150,7 +142,7 @@ func (Q *QTree) takeNearest(focus V2, num int) Points {
 		if !n.Rect.Intersects(maxRect) {
 			continue
 		}
-		if n.subN == 0 {
+		if n.subN == 0 || maxRect.Contains(n.Rect) {
 			spotPoints = append(spotPoints, n.points...)
 		} else {
 			inds = append(inds, n.subN, n.subN+1, n.subN+2, n.subN+3)
